@@ -1,0 +1,479 @@
+---
+title: "Project Classification in R - module 5: Ensemble Learning - Stacking"
+author: "Jakub Tomczak"
+date: "2026-05-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## **5. Ensemble learning - Stacking method**
+
+In this part, ensemble learning was used, with stacking as the method for obtaining the final prediction. First, three bottom-layer models were trained: Logistic Regression, Random Forest, and XGBoost. This time, only one group of features was selected as variables, chosen using the Boruta method. Then, various voting methods (Average Voting, Weighted Average Voting, Majority Voting, Stacking) were used to select the final prediction, and the method that achieved the best result on the validation set was selected as the final model.
+
+At the end of the script, the results of all three models/methods used in the project (Random Forest, XGBoost, Stacking) will be compared, and the best method will be selected based on the result obtained on the test set.
+
+```{r, message=FALSE, warning=FALSE}
+# loading all necessary libraries
+
+library(here)
+library(kableExtra)
+library(rsample)
+library(dplyr)
+library(fastDummies)
+library(ggplot2)
+library(caret)
+library(ranger)
+library(xgboost)
+library(glmnet)
+source(here::here("new_project_r", "functions", "save_plot.R"))
+```
+
+```{r}
+# Setting seed for reproducibility 
+
+set.seed(123)
+```
+
+#### **Importing data and splitting train dataset into train and validation sets**
+
+```{r}
+data <- read.csv(here("data", "train_fe.csv"))
+test_data <- read.csv(here("data", "data_test_cleaned.csv"))
+fr <- read.csv(here("data", "feature_ranking.csv"))
+```
+
+```{r}
+set.seed(123)
+
+# Stratified dataset split
+data_split <- initial_split(data, prop = 0.8, strata = claim_status)
+
+df_res <- training(data_split)
+df_val <- testing(data_split)
+
+table(df_res$claim_status)
+```
+
+### **Feature group selection**
+
+Only one group of features was selected: the Boruta method features. This feature group achieved the best results in previous models.
+
+```{r}
+br_features <- c('subscription_length_sqrt', 'subscription_length', 'ncap_rating', 'vehicle_age', 'region_density_sqrt', 'gross_weight', 'displacement', 'width', 'region_density', 'customer_age', 'customer_age_log', 'vehicle_age_cut')
+
+# Prepare feature sets
+X_train <- df_res[, br_features]
+y_train <- df_res$claim_status
+
+X_val <- df_val[, br_features]
+y_val <- df_val$claim_status
+```
+
+### **Ensemble Base Models - Logistic Regression, Random Forest, and XGBoost**
+
+We train three base models that will be used in the ensemble methods.
+
+```{r}
+# Set up control parameters
+balanced_accuracy_summary <- function(data, lev = NULL, model = NULL) {
+  lvls <- levels(data$obs)
+  cm <- confusionMatrix(data$pred, data$obs, positive = lvls[2])
+  out <- cm$byClass["Balanced Accuracy"]
+  names(out) <- "Balanced_Accuracy"
+  out
+}
+
+control <- trainControl(
+  method = "cv",
+  number = 5,
+  summaryFunction = balanced_accuracy_summary,
+  classProbs = TRUE,
+  verboseIter = FALSE
+)
+
+y_factor <- as.factor(paste0("class_", y_train))
+y_val_factor <- as.factor(paste0("class_", y_val))
+
+class_counts <- table(y_factor)
+weights <- ifelse(y_factor == names(class_counts)[1], 
+                  sum(class_counts) / (2 * class_counts[1]), 
+                  sum(class_counts) / (2 * class_counts[2]))
+
+scale_pos_weight <- class_counts[1] / class_counts[2]
+```
+
+#### **1. Logistic Regression**
+
+```{r}
+set.seed(123)
+lr_model <- train(
+  x = X_train,
+  y = y_factor,
+  method = "glmnet",
+  trControl = control,
+  metric = "Balanced_Accuracy",
+  tuneGrid = expand.grid(
+    alpha = 1,
+    lambda = 0.001
+  ),
+  family = "binomial"
+)
+
+# CV Performance
+lr_cv_acc <- mean(lr_model$resample$Balanced_Accuracy)
+lr_cv_sd <- sd(lr_model$resample$Balanced_Accuracy)
+
+# Validation Performance
+lr_pred_val <- predict(lr_model, X_val, type = "raw")
+lr_cm_val <- confusionMatrix(lr_pred_val, y_val_factor)
+lr_val_acc <- lr_cm_val$byClass["Balanced Accuracy"]
+
+cat("Logistic Regression:\n")
+cat("  CV Balanced Accuracy Mean:", round(lr_cv_acc, 4), "\n")
+cat("  CV Balanced Accuracy SD:", round(lr_cv_sd, 4), "\n")
+cat("  Validation Balanced Accuracy:", round(lr_val_acc, 4), "\n\n")
+```
+
+#### **2. Random Forest**
+
+```{r}
+set.seed(123)
+rf_model <- train(
+  x = X_train,
+  y = y_factor,
+  method = "ranger",
+  trControl = control,
+  metric = "Balanced_Accuracy",
+  tuneGrid = expand.grid(
+    mtry = 6,
+    splitrule = "gini",
+    min.node.size = 1
+  ),
+  num.trees = 300,
+  weights = weights,
+  num.threads = parallel::detectCores(),
+  max.depth = 5,
+  sample.fraction = 0.6
+)
+
+# CV Performance
+rf_cv_acc <- mean(rf_model$resample$Balanced_Accuracy)
+rf_cv_sd <- sd(rf_model$resample$Balanced_Accuracy)
+
+# Validation Performance
+rf_pred_val <- predict(rf_model, X_val, type = "raw")
+rf_cm_val <- confusionMatrix(rf_pred_val, y_val_factor)
+rf_val_acc <- rf_cm_val$byClass["Balanced Accuracy"]
+
+cat("Random Forest:\n")
+cat("  CV Balanced Accuracy Mean:", round(rf_cv_acc, 4), "\n")
+cat("  CV Balanced Accuracy SD:", round(rf_cv_sd, 4), "\n")
+cat("  Validation Balanced Accuracy:", round(rf_val_acc, 4), "\n\n")
+```
+
+#### **3. XGBoost**
+
+```{r}
+set.seed(123)
+xgb_model <- train(
+  x = X_train,
+  y = y_factor,
+  method = "xgbTree",
+  trControl = control,
+  metric = "Balanced_Accuracy",
+  tuneGrid = expand.grid(
+    max_depth = 4,
+    learning_rate = 0.05,
+    n_estimators = 600,
+    gamma = 0,
+    colsample_bytree = 1,
+    min_child_weight = 1,
+    subsample = 1
+  ),
+  scale_pos_weight = scale_pos_weight,
+  objective = "binary:logistic",
+  verbose = FALSE
+)
+
+# CV Performance
+xgb_cv_acc <- mean(xgb_model$resample$Balanced_Accuracy)
+xgb_cv_sd <- sd(xgb_model$resample$Balanced_Accuracy)
+
+# Validation Performance
+xgb_pred_val <- predict(xgb_model, X_val, type = "raw")
+xgb_cm_val <- confusionMatrix(xgb_pred_val, y_val_factor)
+xgb_val_acc <- xgb_cm_val$byClass["Balanced Accuracy"]
+
+cat("XGBoost:\n")
+cat("  CV Balanced Accuracy Mean:", round(xgb_cv_acc, 4), "\n")
+cat("  CV Balanced Accuracy SD:", round(xgb_cv_sd, 4), "\n")
+cat("  Validation Balanced Accuracy:", round(xgb_val_acc, 4), "\n\n")
+```
+
+```{r}
+# Summary table of base models
+base_models_performance <- data.frame(
+  Model = c("Logistic Regression", "Random Forest", "XGBoost"),
+  CV_Mean = c(lr_cv_acc, rf_cv_acc, xgb_cv_acc),
+  CV_SD = c(lr_cv_sd, rf_cv_sd, xgb_cv_sd),
+  Val_Accuracy = c(lr_val_acc, rf_val_acc, xgb_val_acc)
+)
+
+kableExtra::kable(base_models_performance, caption = "Base Models Performance")
+```
+
+### **Ensemble Methods**
+
+Now we use various voting and stacking methods to combine predictions from the three base models.
+
+#### **1. Average Voting**
+
+```{r}
+# Get probability predictions for validation set
+lr_proba_val <- predict(lr_model, X_val, type = "prob")
+rf_proba_val <- predict(rf_model, X_val, type = "prob")
+xgb_proba_val <- predict(xgb_model, X_val, type = "prob")
+
+# Average the probabilities
+avg_proba_val <- (lr_proba_val[, 2] + rf_proba_val[, 2] + xgb_proba_val[, 2]) / 3
+
+# Get predictions
+avg_pred_val <- ifelse(avg_proba_val >= 0.5, 1, 0)
+avg_pred_val <- factor(avg_pred_val, levels = c(0, 1), labels = levels(y_val_factor))
+
+# Calculate metrics
+avg_cm <- confusionMatrix(avg_pred_val, y_val_factor)
+avg_balanced_acc <- avg_cm$byClass["Balanced Accuracy"]
+
+cat("Average Voting - Validation Balanced Accuracy:", round(avg_balanced_acc, 4), "\n\n")
+```
+
+#### **2. Weighted Average Voting**
+
+```{r}
+# Calculate weights based on cross-validation performance
+weights_ensemble <- c(lr_cv_acc, rf_cv_acc, xgb_cv_acc)
+weights_ensemble <- weights_ensemble / sum(weights_ensemble)
+
+# Weighted average of probabilities
+weighted_avg_proba_val <- (weights_ensemble[1] * lr_proba_val[, 2] + 
+                            weights_ensemble[2] * rf_proba_val[, 2] + 
+                            weights_ensemble[3] * xgb_proba_val[, 2])
+
+# Get predictions
+weighted_avg_pred_val <- ifelse(weighted_avg_proba_val >= 0.5, 1, 0)
+weighted_avg_pred_val <- factor(weighted_avg_pred_val, levels = c(0, 1), labels = levels(y_val_factor))
+
+# Calculate metrics
+weighted_avg_cm <- confusionMatrix(weighted_avg_pred_val, y_val_factor)
+weighted_avg_balanced_acc <- weighted_avg_cm$byClass["Balanced Accuracy"]
+
+cat("Weighted Average Voting Weights:\n")
+cat("  Logistic Regression:", round(weights_ensemble[1], 4), "\n")
+cat("  Random Forest:", round(weights_ensemble[2], 4), "\n")
+cat("  XGBoost:", round(weights_ensemble[3], 4), "\n")
+cat("Weighted Average Voting - Validation Balanced Accuracy:", round(weighted_avg_balanced_acc, 4), "\n\n")
+```
+
+#### **3. Majority Voting**
+
+```{r}
+# Get hard predictions for validation set
+lr_hard_pred_val <- as.numeric(lr_proba_val[, 2] >= 0.5)
+rf_hard_pred_val <- as.numeric(rf_proba_val[, 2] >= 0.5)
+xgb_hard_pred_val <- as.numeric(xgb_proba_val[, 2] >= 0.5)
+
+# Majority voting
+majority_votes <- lr_hard_pred_val + rf_hard_pred_val + xgb_hard_pred_val
+majority_pred_val <- ifelse(majority_votes >= 2, 1, 0)
+majority_pred_val <- factor(majority_pred_val, levels = c(0, 1), labels = levels(y_val_factor))
+
+# Calculate metrics
+majority_cm <- confusionMatrix(majority_pred_val, y_val_factor)
+majority_balanced_acc <- majority_cm$byClass["Balanced Accuracy"]
+
+cat("Majority Voting - Validation Balanced Accuracy:", round(majority_balanced_acc, 4), "\n\n")
+```
+
+#### **4. Stacking (Meta-learner)**
+
+```{r}
+# Generate meta-features from training set
+lr_proba_train <- predict(lr_model, X_train, type = "prob")
+rf_proba_train <- predict(rf_model, X_train, type = "prob")
+xgb_proba_train <- predict(xgb_model, X_train, type = "prob")
+
+# Create meta-features (use probability of class 1)
+meta_X_train <- data.frame(
+  lr_pred = lr_proba_train[, 2],
+  rf_pred = rf_proba_train[, 2],
+  xgb_pred = xgb_proba_train[, 2]
+)
+
+# Create meta-features for validation set
+meta_X_val <- data.frame(
+  lr_pred = lr_proba_val[, 2],
+  rf_pred = rf_proba_val[, 2],
+  xgb_pred = xgb_proba_val[, 2]
+)
+
+# Train meta-learner (Logistic Regression)
+set.seed(123)
+meta_model <- train(
+  x = meta_X_train,
+  y = y_factor,
+  method = "glmnet",
+  trControl = trainControl(method = "none"),
+  tuneGrid = expand.grid(
+    alpha = 1,
+    lambda = 0.001
+  ),
+  family = "binomial"
+)
+
+# Get stacking predictions on validation set
+stack_proba_val <- predict(meta_model, meta_X_val, type = "prob")
+stack_pred_val <- predict(meta_model, meta_X_val, type = "raw")
+
+# Calculate metrics
+stack_cm <- confusionMatrix(stack_pred_val, y_val_factor)
+stack_balanced_acc <- stack_cm$byClass["Balanced Accuracy"]
+
+cat("Stacking - Validation Balanced Accuracy:", round(stack_balanced_acc, 4), "\n\n")
+```
+
+### **Comparison of Ensemble Methods**
+
+```{r}
+ensemble_results <- data.frame(
+  Method = c("Average Voting", "Weighted Average Voting", "Majority Voting", "Stacking"),
+  Val_Balanced_Accuracy = c(avg_balanced_acc, weighted_avg_balanced_acc, majority_balanced_acc, stack_balanced_acc)
+) %>%
+  arrange(desc(Val_Balanced_Accuracy))
+
+kableExtra::kable(ensemble_results, caption = "Ensemble Methods Performance on Validation Set")
+
+# Select best ensemble method
+best_ensemble_method <- ensemble_results$Method[1]
+best_ensemble_score <- ensemble_results$Val_Balanced_Accuracy[1]
+
+cat("\n\nBest Ensemble Method:", best_ensemble_method, "\n")
+cat("Balanced Accuracy:", round(best_ensemble_score, 4), "\n")
+```
+
+### **Testing on Test Set**
+
+```{r}
+# Prepare test data
+X_test <- test_data[, br_features]
+y_test <- test_data$claim_status
+y_test_factor <- as.factor(paste0("class_", y_test))
+
+# Get predictions from base models on test set
+lr_proba_test <- predict(lr_model, X_test, type = "prob")
+rf_proba_test <- predict(rf_model, X_test, type = "prob")
+xgb_proba_test <- predict(xgb_model, X_test, type = "prob")
+
+# Average Voting
+avg_proba_test <- (lr_proba_test[, 2] + rf_proba_test[, 2] + xgb_proba_test[, 2]) / 3
+avg_pred_test <- ifelse(avg_proba_test >= 0.5, 1, 0)
+avg_pred_test <- factor(avg_pred_test, levels = c(0, 1), labels = levels(y_test_factor))
+avg_cm_test <- confusionMatrix(avg_pred_test, y_test_factor)
+avg_test_acc <- avg_cm_test$byClass["Balanced Accuracy"]
+
+# Weighted Average Voting
+weighted_avg_proba_test <- (weights_ensemble[1] * lr_proba_test[, 2] + 
+                            weights_ensemble[2] * rf_proba_test[, 2] + 
+                            weights_ensemble[3] * xgb_proba_test[, 2])
+weighted_avg_pred_test <- ifelse(weighted_avg_proba_test >= 0.5, 1, 0)
+weighted_avg_pred_test <- factor(weighted_avg_pred_test, levels = c(0, 1), labels = levels(y_test_factor))
+weighted_avg_cm_test <- confusionMatrix(weighted_avg_pred_test, y_test_factor)
+weighted_avg_test_acc <- weighted_avg_cm_test$byClass["Balanced Accuracy"]
+
+# Majority Voting
+lr_hard_pred_test <- as.numeric(lr_proba_test[, 2] >= 0.5)
+rf_hard_pred_test <- as.numeric(rf_proba_test[, 2] >= 0.5)
+xgb_hard_pred_test <- as.numeric(xgb_proba_test[, 2] >= 0.5)
+majority_votes_test <- lr_hard_pred_test + rf_hard_pred_test + xgb_hard_pred_test
+majority_pred_test <- ifelse(majority_votes_test >= 2, 1, 0)
+majority_pred_test <- factor(majority_pred_test, levels = c(0, 1), labels = levels(y_test_factor))
+majority_cm_test <- confusionMatrix(majority_pred_test, y_test_factor)
+majority_test_acc <- majority_cm_test$byClass["Balanced Accuracy"]
+
+# Stacking
+meta_X_test <- data.frame(
+  lr_pred = lr_proba_test[, 2],
+  rf_pred = rf_proba_test[, 2],
+  xgb_pred = xgb_proba_test[, 2]
+)
+stack_pred_test <- predict(meta_model, meta_X_test, type = "raw")
+stack_cm_test <- confusionMatrix(stack_pred_test, y_test_factor)
+stack_test_acc <- stack_cm_test$byClass["Balanced Accuracy"]
+```
+
+```{r}
+# Load previously trained models
+rf_best_model <- readRDS(here("new_project_r", "outputs", "random_forest_model.rds"))
+xgb_best_model <- readRDS(here("new_project_r", "outputs", "xgboost_model.rds"))
+
+# Get test set predictions from best individual models
+rf_test_pred <- predict(rf_best_model, X_test, type = "raw")
+rf_cm_test <- confusionMatrix(rf_test_pred, y_test_factor)
+rf_test_acc <- rf_cm_test$byClass["Balanced Accuracy"]
+
+xgb_test_pred <- predict(xgb_best_model, X_test, type = "raw")
+xgb_cm_test <- confusionMatrix(xgb_test_pred, y_test_factor)
+xgb_test_acc <- xgb_cm_test$byClass["Balanced Accuracy"]
+```
+
+### **Final Comparison: All Models and Methods**
+
+```{r}
+final_comparison <- data.frame(
+  Model_Method = c(
+    "Random Forest",
+    "XGBoost",
+    "Average Voting",
+    "Weighted Average Voting",
+    "Majority Voting",
+    "Stacking"
+  ),
+  Test_Balanced_Accuracy = c(
+    rf_test_acc,
+    xgb_test_acc,
+    avg_test_acc,
+    weighted_avg_test_acc,
+    majority_test_acc,
+    stack_test_acc
+  )
+) %>%
+  arrange(desc(Test_Balanced_Accuracy))
+
+kableExtra::kable(final_comparison, caption = "Final Comparison - All Models on Test Set")
+```
+
+```{r}
+best_overall_model <- final_comparison$Model_Method[1]
+best_overall_score <- final_comparison$Test_Balanced_Accuracy[1]
+
+cat("\n\n")
+cat("="*60, "\n")
+cat("BEST OVERALL MODEL: ", best_overall_model, "\n")
+cat("TEST SET BALANCED ACCURACY: ", round(best_overall_score, 4), "\n")
+cat("="*60, "\n")
+```
+
+### **Summary**
+
+The project has been completed successfully with a comprehensive comparison of three different modeling approaches:
+
+1. **Random Forest** - Traditional ensemble method
+2. **XGBoost** - Gradient boosting approach
+3. **Stacking and Voting Methods** - Advanced ensemble techniques combining multiple base models
+
+The best performing method on the test set is **`r best_overall_model`** with a balanced accuracy of **`r round(best_overall_score, 4)`**. This demonstrates that ensemble methods can significantly improve model performance when properly tuned and combined.
+
+All models were evaluated using **balanced accuracy** as the evaluation metric, which is particularly important for this imbalanced dataset, ensuring equal importance is given to both classes regardless of their distribution in the data.

@@ -1,0 +1,339 @@
+---
+title: "Project Classification in R - module 4: XGBoost"
+author: "Jakub Tomczak"
+date: "2026-05-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## **4. XGBoost model**
+
+In this part, the XGBoost model was implemented. XGBoost was chosen over other boosting models (like AdaBoost or Gradient Boosting) because it better handles imbalanced datasets by combining strong regularization and flexible loss weighting. Feature groups created earlier (for the Random Forest model) were used also for this model. In the next part of script, hyperparameter tuning will be performed and the best parameters for each feature group will be selected in the cross-validation process. Finally, models for all groups will be tested on the validation set, and the final model with the best result will be selected and tested on test set.
+
+```{r, message=FALSE, warning=FALSE}
+# loading all necessary libraries
+
+library(here)
+library(kableExtra)
+library(rsample)
+library(dplyr)
+library(fastDummies)
+library(ggplot2)
+library(caret)
+library(xgboost)
+source(here::here("new_project_r", "functions", "save_plot.R"))
+source(here::here("new_project_r", "functions", "xgboost_cross_val.R"))
+```
+
+```{r}
+# Setting seed for reproducibility 
+
+set.seed(123)
+```
+
+#### **Importing data and splitting train dataset into train and validation sets**
+
+```{r}
+data <- read.csv(here("data", "train_fe.csv"))
+test_data <- read.csv(here("data", "data_test_cleaned.csv"))
+fr <- read.csv(here("data", "feature_ranking.csv"))
+```
+
+```{r}
+set.seed(123)
+
+# Stratified dataset split
+data_split <- initial_split(data, prop = 0.8, strata = claim_status)
+
+df_res <- training(data_split)
+df_val <- testing(data_split)
+
+table(df_res$claim_status)
+```
+
+### **Choosing features for XGBoost model**
+
+We use the same feature groups as for the Random Forest model to enable comparison.
+
+#### Benchmark
+
+We select all our features as benchmark
+
+```{r}
+benchmark_input <- setdiff(colnames(df_res), "claim_status")
+```
+
+#### **Variance threshold**
+
+We select 15 features with the highest variance
+
+```{r}
+general_ranking <- fr
+
+var_features <- general_ranking %>%
+  arrange(desc(variance)) %>%  
+  slice(1:15) %>%               
+  pull(feature)
+```
+
+#### **Mutual Information**
+
+```{r}
+mi_features_15 <- general_ranking %>%
+  arrange(desc(mi_score)) %>%  
+  slice(1:15) %>%               
+  pull(feature)
+```
+
+```{r}
+mi_features_25 <- general_ranking %>%
+  arrange(desc(mi_score)) %>%  
+  slice(1:25) %>%               
+  pull(feature)
+```
+
+#### **Boruta**
+
+```{r}
+br_features <- c('subscription_length_sqrt', 'subscription_length', 'ncap_rating', 'vehicle_age', 'region_density_sqrt', 'gross_weight', 'displacement', 'width', 'region_density', 'customer_age', 'customer_age_log', 'vehicle_age_cut')
+```
+
+#### **Correlation**
+
+We select 25 features most correlated to target variable
+
+```{r}
+corr_features <- general_ranking %>%
+  arrange(desc(corr)) %>%  
+  slice(1:25) %>%               
+  pull(feature)
+```
+
+#### **F-test**
+
+We select features with p-value < 0.05 in F test, then remove highly correlated features
+
+```{r}
+F_test_features <- general_ranking %>%
+  filter(sign_fscore_0_1 == 1) %>%
+  pull(feature)
+
+# Remove highly correlated features
+corr_matrix <- cor(df_res[F_test_features], method = "spearman", use = "pairwise.complete.obs")
+
+foo <- as.data.frame(as.table(corr_matrix)) %>%
+  rename(Var1 = Var1, Var2 = Var2, corr_val = Freq) %>%
+  filter(as.character(Var1) < as.character(Var2)) %>%
+  mutate(abs_corr = abs(corr_val)) %>%
+  arrange(desc(abs_corr))
+
+# Remove one feature from each highly correlated pair
+F_test_features <- F_test_features[F_test_features != "max_torque_113Nm.4400rpm"]
+F_test_features <- F_test_features[F_test_features != "subscription_length"]
+F_test_features <- F_test_features[F_test_features != "region_density_sqrt"]
+F_test_features <- F_test_features[F_test_features != "customer_age"]
+F_test_features <- F_test_features[F_test_features != "vehicle_age_cut"]
+```
+
+### **XGBoost hyperparameters tuning:**
+
+The following hyperparameters are tuned using cross-validation:
+
+- **max_depth** - Maximum depth of each tree
+- **learning_rate** - Step size shrinkage (controls learning rate)
+- **n_estimators** - Number of boosting rounds
+- **gamma** - Minimum loss reduction required to make a split
+- **reg_lambda** - L2 regularization term on weights
+
+```{r}
+best_params_benchmark <- xgboost_cross_val(
+  X_train = df_res[, benchmark_input], 
+  y_train = df_res$claim_status
+)
+```
+
+```{r}
+best_params_var <- xgboost_cross_val(
+  X_train = df_res[, var_features], 
+  y_train = df_res$claim_status
+)
+```
+
+```{r}
+best_params_mi15 <- xgboost_cross_val(
+  X_train = df_res[, mi_features_15], 
+  y_train = df_res$claim_status
+)
+```
+
+```{r}
+best_params_mi25 <- xgboost_cross_val(
+  X_train = df_res[, mi_features_25], 
+  y_train = df_res$claim_status
+)
+```
+
+```{r}
+best_params_boruta <- xgboost_cross_val(
+  X_train = df_res[, br_features], 
+  y_train = df_res$claim_status
+)
+```
+
+```{r}
+best_params_corr <- xgboost_cross_val(
+  X_train = df_res[, corr_features], 
+  y_train = df_res$claim_status
+)
+```
+
+```{r}
+best_params_Ftest <- xgboost_cross_val(
+  X_train = df_res[, F_test_features], 
+  y_train = df_res$claim_status
+)
+```
+
+### **Now we choose the best model using the validation dataset**
+
+Code below calculates balanced accuracy score for each feature group with best parameters. Model with highest score on validation set is chosen as our final best model for XGBoost algorithm
+
+```{r}
+feature_groups <- list(
+  "benchmark_input" = benchmark_input,
+  "var_features"    = var_features,
+  "mi_features_15"  = mi_features_15,
+  "mi_features_25"  = mi_features_25,
+  "br_features"     = br_features,
+  "corr_features"   = corr_features,
+  "F_test_features" = F_test_features
+)
+
+xgb_params <- list(
+  "benchmark_input"  = list(max_depth = 3, learning_rate = 0.05, n_estimators = 300, gamma = 0, reg_lambda = 1),
+  "var_features"     = list(max_depth = 3, learning_rate = 0.1, n_estimators = 300, gamma = 0, reg_lambda = 1),
+  "mi_features_15"   = list(max_depth = 4, learning_rate = 0.05, n_estimators = 600, gamma = 0.25, reg_lambda = 10),
+  "mi_features_25"   = list(max_depth = 3, learning_rate = 0.1, n_estimators = 300, gamma = 0, reg_lambda = 10),
+  "br_features"      = list(max_depth = 4, learning_rate = 0.05, n_estimators = 600, gamma = 0, reg_lambda = 1),
+  "corr_features"    = list(max_depth = 3, learning_rate = 0.1, n_estimators = 300, gamma = 0.25, reg_lambda = 1),
+  "F_test_features"  = list(max_depth = 4, learning_rate = 0.05, n_estimators = 600, gamma = 0, reg_lambda = 10)
+)
+
+balanced_accuracy_summary <- function(data, lev = NULL, model = NULL) {
+  lvls <- levels(data$obs)
+  cm <- confusionMatrix(data$pred, data$obs, positive = lvls[2])
+  out <- cm$byClass["Balanced Accuracy"]
+  names(out) <- "Balanced_Accuracy"
+  out
+}
+
+control <- trainControl(
+  method = "none",
+  classProbs = TRUE,
+  verboseIter = FALSE
+)
+
+y_factor <- as.factor(paste0("class_", df_res$claim_status))
+
+class_counts <- table(y_factor)
+scale_pos_weight <- class_counts[1] / class_counts[2]
+
+best_group <- NULL
+best_score <- 0
+xgb_results <- data.frame()
+
+for (name in names(feature_groups)) {
+  features <- feature_groups[[name]]
+  params <- xgb_params[[name]]
+  
+  X_subset <- df_res[, features, drop = FALSE]
+  
+  set.seed(123)
+  model <- train(
+    x = X_subset,
+    y = y_factor,
+    method = "xgbTree",
+    trControl = control,
+    tuneGrid = params,
+    scale_pos_weight = scale_pos_weight,
+    objective = "binary:logistic",
+    verbose = FALSE
+  )
+  
+  # Make predictions on validation set
+  y_val_factor <- as.factor(paste0("class_", df_val$claim_status))
+  X_val_subset <- df_val[, features, drop = FALSE]
+  
+  predictions <- predict(model, X_val_subset, type = "raw")
+  
+  # Calculate balanced accuracy
+  cm <- confusionMatrix(predictions, y_val_factor)
+  balanced_acc <- cm$byClass["Balanced Accuracy"]
+  
+  cat(paste("\n", name, ": Balanced Accuracy =", round(balanced_acc, 4), "\n"))
+  
+  xgb_results <- rbind(xgb_results, data.frame(
+    feature_group = name,
+    balanced_accuracy = balanced_acc,
+    num_features = length(features)
+  ))
+  
+  if (balanced_acc > best_score) {
+    best_score <- balanced_acc
+    best_group <- name
+    best_model <- model
+    best_features <- features
+  }
+}
+```
+
+```{r}
+cat("\n============================================\n")
+cat("Best XGBoost Model:\n")
+cat("Feature Group:", best_group, "\n")
+cat("Balanced Accuracy on Validation Set:", round(best_score, 4), "\n")
+cat("Number of Features:", length(best_features), "\n")
+cat("============================================\n")
+```
+
+```{r}
+xgb_results_table <- xgb_results %>%
+  arrange(desc(balanced_accuracy)) %>%
+  kableExtra::kable(caption = "XGBoost Model Performance on Validation Set")
+
+print(xgb_results_table)
+```
+
+### **Testing the best XGBoost model on test set**
+
+```{r}
+# Load test data
+test_set <- read.csv(here("data", "data_test_cleaned.csv"))
+
+# Prepare test features
+test_features <- test_set %>%
+  select(all_of(best_features))
+
+# Make predictions
+test_predictions <- predict(best_model, test_features, type = "raw")
+
+# Calculate metrics on test set
+test_balanced_acc <- balanced_accuracy_score(test_set$claim_status, as.numeric(test_predictions) - 1)
+
+cat("\n============================================\n")
+cat("XGBoost Model Test Performance:\n")
+cat("Balanced Accuracy on Test Set:", round(test_balanced_acc, 4), "\n")
+cat("============================================\n")
+```
+
+```{r}
+# Save the best model
+saveRDS(best_model, here("new_project_r", "outputs", "xgboost_model.rds"))
+```
+
+### **Summary**
+
+The XGBoost model has been successfully trained and evaluated. The best performing feature group on the validation set was **`r best_group`** with a balanced accuracy of **`r round(best_score, 4)`**. This model will be used as one of the base models in the ensemble method in the final part of the project.
