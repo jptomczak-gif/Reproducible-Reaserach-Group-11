@@ -377,7 +377,7 @@ weights <- ifelse(y_factor == names(class_counts)[1],
 
 set.seed(123) 
 best_model <- ranger(
-  x               = df_res[, benchmark_input],
+  x               = df_res[, mi_features_25],
   y               = y_factor,
   num.trees       = 300,        
   splitrule       = "gini",     

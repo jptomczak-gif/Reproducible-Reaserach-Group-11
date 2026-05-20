@@ -114,7 +114,7 @@ corr_features <- general_ranking %>%
 
 #### **F-test**
 
-We select features with p-value < 0.05 in F test, then remove highly correlated features
+We select features with p-value \< 0.05 in F test, then remove highly correlated features
 
 ```{r}
 F_test_features <- general_ranking %>%
@@ -142,11 +142,11 @@ F_test_features <- F_test_features[F_test_features != "vehicle_age_cut"]
 
 The following hyperparameters are tuned using cross-validation:
 
-- **max_depth** - Maximum depth of each tree
-- **learning_rate** - Step size shrinkage (controls learning rate)
-- **n_estimators** - Number of boosting rounds
-- **gamma** - Minimum loss reduction required to make a split
-- **reg_lambda** - L2 regularization term on weights
+-   **max_depth** - Maximum depth of each tree
+-   **learning_rate** - Step size shrinkage (controls learning rate)
+-   **n_estimators** - Number of boosting rounds
+-   **gamma** - Minimum loss reduction required to make a split
+-   **reg_lambda** - L2 regularization term on weights
 
 ```{r}
 best_params_benchmark <- xgboost_cross_val(
@@ -213,13 +213,13 @@ feature_groups <- list(
 )
 
 xgb_params <- list(
-  "benchmark_input"  = list(max_depth = 3, learning_rate = 0.05, n_estimators = 300, gamma = 0, reg_lambda = 1),
-  "var_features"     = list(max_depth = 3, learning_rate = 0.1, n_estimators = 300, gamma = 0, reg_lambda = 1),
-  "mi_features_15"   = list(max_depth = 4, learning_rate = 0.05, n_estimators = 600, gamma = 0.25, reg_lambda = 10),
-  "mi_features_25"   = list(max_depth = 3, learning_rate = 0.1, n_estimators = 300, gamma = 0, reg_lambda = 10),
-  "br_features"      = list(max_depth = 4, learning_rate = 0.05, n_estimators = 600, gamma = 0, reg_lambda = 1),
-  "corr_features"    = list(max_depth = 3, learning_rate = 0.1, n_estimators = 300, gamma = 0.25, reg_lambda = 1),
-  "F_test_features"  = list(max_depth = 4, learning_rate = 0.05, n_estimators = 600, gamma = 0, reg_lambda = 10)
+  "benchmark_input"  = list(max_depth = 3, eta = 0.05, nrounds = 300, gamma = 0, lambda = 1),
+  "var_features"     = list(max_depth = 3, eta = 0.1, nrounds = 300, gamma = 0, lambda = 1),
+  "mi_features_15"   = list(max_depth = 4, eta = 0.05, nrounds = 600, gamma = 0.25, lambda = 10),
+  "mi_features_25"   = list(max_depth = 3, eta = 0.1, nrounds = 300, gamma = 0, lambda = 10),
+  "br_features"      = list(max_depth = 4, eta = 0.05, nrounds = 600, gamma = 0, lambda = 1),
+  "corr_features"    = list(max_depth = 3, eta = 0.1, nrounds = 300, gamma = 0.25, lambda = 1),
+  "F_test_features"  = list(max_depth = 4, eta = 0.05, nrounds = 600, gamma = 0, lambda = 10)
 )
 
 balanced_accuracy_summary <- function(data, lev = NULL, model = NULL) {
@@ -249,28 +249,37 @@ for (name in names(feature_groups)) {
   features <- feature_groups[[name]]
   params <- xgb_params[[name]]
   
-  X_subset <- df_res[, features, drop = FALSE]
+  X_train_mat <- as.matrix(df_res[, features, drop = FALSE])
+  y_train_vec <- df_res$claim_status 
   
-  set.seed(123)
-  model <- train(
-    x = X_subset,
-    y = y_factor,
-    method = "xgbTree",
-    trControl = control,
-    tuneGrid = params,
-    scale_pos_weight = scale_pos_weight,
-    objective = "binary:logistic",
-    verbose = FALSE
+  dtrain <- xgb.DMatrix(data = X_train_mat, label = y_train_vec)
+  
+  full_params <- list(
+    objective        = "binary:logistic",
+    eval_metric      = "logloss",
+    max_depth        = params$max_depth,
+    eta              = params$eta,
+    gamma            = params$gamma,
+    lambda           = params$lambda,
+    scale_pos_weight = scale_pos_weight
   )
   
-  # Make predictions on validation set
+  set.seed(123)
+  model_native <- xgb.train(
+    params  = full_params,
+    data    = dtrain,
+    nrounds = params$nrounds,
+    verbose = 0                
+  )
+  
+  X_val_mat <- as.matrix(df_val[, features, drop = FALSE])
   y_val_factor <- as.factor(paste0("class_", df_val$claim_status))
-  X_val_subset <- df_val[, features, drop = FALSE]
   
-  predictions <- predict(model, X_val_subset, type = "raw")
+  pred_probs <- predict(model_native, X_val_mat)
+  pred_classes <- ifelse(pred_probs > 0.5, "class_1", "class_0")
+  pred_factor <- factor(pred_classes, levels = c("class_0", "class_1"))
   
-  # Calculate balanced accuracy
-  cm <- confusionMatrix(predictions, y_val_factor)
+  cm <- confusionMatrix(pred_factor, y_val_factor)
   balanced_acc <- cm$byClass["Balanced Accuracy"]
   
   cat(paste("\n", name, ": Balanced Accuracy =", round(balanced_acc, 4), "\n"))
@@ -284,7 +293,7 @@ for (name in names(feature_groups)) {
   if (balanced_acc > best_score) {
     best_score <- balanced_acc
     best_group <- name
-    best_model <- model
+    best_model <- model_native
     best_features <- features
   }
 }
@@ -307,31 +316,49 @@ xgb_results_table <- xgb_results %>%
 print(xgb_results_table)
 ```
 
-### **Testing the best XGBoost model on test set**
+#### Saving the best model
 
 ```{r}
-# Load test data
-test_set <- read.csv(here("data", "data_test_cleaned.csv"))
 
-# Prepare test features
-test_features <- test_set %>%
-  select(all_of(best_features))
+X_train_mat <- as.matrix(df_res[, benchmark_input])
 
-# Make predictions
-test_predictions <- predict(best_model, test_features, type = "raw")
+y_train_vec <- df_res$claim_status 
 
-# Calculate metrics on test set
-test_balanced_acc <- balanced_accuracy_score(test_set$claim_status, as.numeric(test_predictions) - 1)
+dtrain <- xgb.DMatrix(data = X_train_mat, label = y_train_vec)
 
-cat("\n============================================\n")
-cat("XGBoost Model Test Performance:\n")
-cat("Balanced Accuracy on Test Set:", round(test_balanced_acc, 4), "\n")
-cat("============================================\n")
+
+class_counts <- table(y_train_vec)
+scale_pos_weight_val <- as.numeric(class_counts["0"] / class_counts["1"])
+
+xgb_params <- list(
+  objective        = "binary:logistic",
+  eval_metric      = "logloss",
+  max_depth        = 3,                     
+  eta              = 0.05,                  
+  gamma            = 0,                     
+  lambda           = 1,                     
+  scale_pos_weight = scale_pos_weight_val   
+)
+
+
+set.seed(123) 
+best_xgb_model <- xgb.train(
+  params  = xgb_params,
+  data    = dtrain,
+  nrounds = 300,        
+  verbose = 0           
+)
 ```
 
 ```{r}
 # Save the best model
-saveRDS(best_model, here("new_project_r", "outputs", "xgboost_model.rds"))
+output_dir <- file.path(here("new_project_r", "outputs"))
+
+
+model_path <- file.path(output_dir, "XGBoost_model.rds")
+saveRDS(best_xgb_model, file = model_path)
+
+cat(paste("Model saved successfully in:", model_path, "\n"))
 ```
 
 ### **Summary**

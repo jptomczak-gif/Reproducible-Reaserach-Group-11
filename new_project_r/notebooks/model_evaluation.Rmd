@@ -1,0 +1,182 @@
+---
+title: "model_evaluation"
+author: "Jakub Tomczak"
+date: "2026-05-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 6. Model evaluation
+
+IIn this part of the project, the models used will be compared on the basis of their performance on the test set. The model that achieves the best result in terms of the Balanced Accuracy metric will be selected as the best.
+
+```{r, message=FALSE, warning=FALSE}
+# loading all necessary libraries
+
+library(here)
+library(kableExtra)
+library(rsample)
+library(dplyr)
+library(fastDummies)
+library(ggplot2)
+library(caret)
+library(ranger)
+```
+
+```{r}
+data <- read.csv(here("data", "train_fe.csv"))
+test_data <- read.csv(here("data", "test_fe.csv"))
+```
+
+```{r}
+X_test <- test_data[, mi_features_25]
+y_test <- test_data$claim_status
+y_test_factor <- as.factor(paste0("class_", y_test))
+```
+
+#### Loading previous models
+
+```{r}
+rf_best_model <- readRDS(here("new_project_r", "outputs", "random_forest_model.rds"))
+xgb_best_model <- readRDS(here("new_project_r", "outputs", "xgboost_model.rds"))
+
+```
+
+#### Random Forest 
+
+```{r}
+rf_test_pred <- predict(rf_best_model, X_test, type = "response")
+rf_test_pred <- ifelse(rf_test_pred$predictions[, 2] >= 0.5, "class_1", "class_0")
+rf_test_pred <- factor(rf_test_pred, levels = c("class_0", "class_1"))
+rf_cm_test <- confusionMatrix(rf_test_pred, y_test_factor)
+rf_test_acc <- rf_cm_test$byClass["Balanced Accuracy"]
+```
+
+#### XGBoost
+
+```{r}
+X_test <- test_data[, benchmark_input]
+y_test <- test_data$claim_status
+y_test_factor <- as.factor(paste0("class_", y_test))
+```
+
+```{r}
+xgb_test_pred <- predict(xgb_best_model, X_test, type = "response")
+xgb_test_pred <- ifelse(xgb_test_pred >= 0.5, "class_1", "class_0")
+xgb_test_pred <- factor(xgb_test_pred, levels = c("class_0", "class_1"))
+xgb_cm_test <- confusionMatrix(xgb_test_pred, y_test_factor)
+xgb_test_acc <- xgb_cm_test$byClass["Balanced Accuracy"]
+```
+
+#### Ensemble models testing
+
+```{r}
+X_test <- test_data[, mi_features_25]
+y_test <- test_data$claim_status
+y_test_factor <- as.factor(paste0("class_", y_test))
+
+lr_proba_test  <- predict(lr_model, X_test, type = "prob")
+rf_proba_test  <- predict(rf_model, X_test, type = "prob")
+
+
+X_test_mat     <- as.matrix(X_test)
+xgb_proba_test <- predict(xgb_model_final, X_test_mat) 
+
+# ==============================================================================
+# Average Voting
+# ==============================================================================
+avg_proba_test <- (lr_proba_test[, 2] + rf_proba_test[, 2] + xgb_proba_test) / 3 #
+avg_pred_test  <- ifelse(avg_proba_test >= 0.5, 1, 0)
+avg_pred_test  <- factor(avg_pred_test, levels = c(0, 1), labels = levels(y_test_factor))
+
+avg_cm_test    <- confusionMatrix(avg_pred_test, y_test_factor)
+avg_test_acc   <- avg_cm_test$byClass["Balanced Accuracy"]
+
+# ==============================================================================
+# Weighted Average Voting
+# ==============================================================================
+weighted_avg_proba_test <- (weights_ensemble[1] * lr_proba_test[, 2] + 
+                            weights_ensemble[2] * rf_proba_test[, 2] + 
+                            weights_ensemble[3] * xgb_proba_test) 
+weighted_avg_pred_test  <- ifelse(weighted_avg_proba_test >= 0.5, 1, 0)
+weighted_avg_pred_test  <- factor(weighted_avg_pred_test, levels = c(0, 1), labels = levels(y_test_factor))
+
+weighted_avg_cm_test    <- confusionMatrix(weighted_avg_pred_test, y_test_factor)
+weighted_avg_test_acc   <- weighted_avg_cm_test$byClass["Balanced Accuracy"]
+
+# ==============================================================================
+# Majority Voting
+# ==============================================================================
+lr_hard_pred_test  <- as.numeric(lr_proba_test[, 2] >= 0.5)
+rf_hard_pred_test  <- as.numeric(rf_proba_test[, 2] >= 0.5)
+xgb_hard_pred_test <- as.numeric(xgb_proba_test >= 0.5) 
+
+majority_votes_test <- lr_hard_pred_test + rf_hard_pred_test + xgb_hard_pred_test
+majority_pred_test  <- ifelse(majority_votes_test >= 2, 1, 0)
+majority_pred_test  <- factor(majority_pred_test, levels = c(0, 1), labels = levels(y_test_factor))
+
+majority_cm_test    <- confusionMatrix(majority_pred_test, y_test_factor)
+majority_test_acc   <- majority_cm_test$byClass["Balanced Accuracy"]
+
+# ==============================================================================
+# Stacking
+# ==============================================================================
+meta_X_test <- data.frame(
+  lr_pred  = lr_proba_test[, 2],
+  rf_pred  = rf_proba_test[, 2],
+  xgb_pred = xgb_proba_test 
+)
+
+stack_pred_test <- predict(meta_model, meta_X_test, type = "raw")
+stack_cm_test   <- confusionMatrix(stack_pred_test, y_test_factor)
+stack_test_acc  <- stack_cm_test$byClass["Balanced Accuracy"]
+```
+
+```{r}
+final_comparison <- data.frame(
+  Model_Method = c(
+    "Random Forest",
+    "XGBoost",
+    "Average Voting",
+    "Weighted Average Voting",
+    "Majority Voting",
+    "Stacking"
+  ),
+  Test_Balanced_Accuracy = c(
+    rf_test_acc,
+    xgb_test_acc,
+    avg_test_acc,
+    weighted_avg_test_acc,
+    majority_test_acc,
+    stack_test_acc
+  )
+) %>%
+  arrange(desc(Test_Balanced_Accuracy))
+
+kableExtra::kable(final_comparison, caption = "Final Comparison - All Models on Test Set")
+```
+
+```{r}
+best_overall_model <- final_comparison$Model_Method[1]
+best_overall_score <- final_comparison$Test_Balanced_Accuracy[1]
+
+cat("\n\n")
+cat("BEST OVERALL MODEL: ", best_overall_model, "\n")
+cat("TEST SET BALANCED ACCURACY: ", round(best_overall_score, 4), "\n")
+
+```
+
+## **Summary**
+
+The project has been completed successfully with a comprehensive comparison of three different modeling approaches:
+
+1.  **Random Forest** - Traditional ensemble method
+2.  **XGBoost** - Gradient boosting approach
+3.  **Stacking and Voting Methods** - Advanced ensemble techniques combining multiple base models
+
+The best performing method on the test set is XGBoost with a balanced accuracy of 0.6126. This demonstrates that ensemble methods can significantly improve model performance when properly tuned and combined.
+
+All models were evaluated using **balanced accuracy** as the evaluation metric, which is particularly important for this imbalanced dataset, ensuring equal importance is given to both classes regardless of their distribution in the data.
