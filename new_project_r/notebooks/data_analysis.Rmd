@@ -160,7 +160,7 @@ correlation_plot <- ggcorrplot(
   type = "full",              
   lab = TRUE,                 
   lab_size = 2,               
-  digits = 3,                 
+  digits = 2,                 
   outline.color = "white",    
   colors = c("#6D9EC1", "white", "#E46726") 
 ) +
@@ -168,7 +168,7 @@ correlation_plot <- ggcorrplot(
         axis.text.y = element_text(size = 12))
 
 # 3. Plot display
-print(p)
+print(correlation_plot)
 ```
 
 Some continuous variables are strongly correlated with each other, while there is virtually no correlation between certain variables.
