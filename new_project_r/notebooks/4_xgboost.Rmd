@@ -143,8 +143,8 @@ F_test_features <- F_test_features[F_test_features != "vehicle_age_cut"]
 The following hyperparameters are tuned using cross-validation:
 
 -   **max_depth** - Maximum depth of each tree
--   **learning_rate** - Step size shrinkage (controls learning rate)
--   **n_estimators** - Number of boosting rounds
+-   **eta**- Step size shrinkage (controls learning rate)
+-   **nrounds**- Number of boosting rounds
 -   **gamma** - Minimum loss reduction required to make a split
 -   **reg_lambda** - L2 regularization term on weights
 
@@ -213,13 +213,13 @@ feature_groups <- list(
 )
 
 xgb_params <- list(
-  "benchmark_input"  = list(max_depth = 3, eta = 0.05, nrounds = 300, gamma = 0, lambda = 1),
-  "var_features"     = list(max_depth = 3, eta = 0.1, nrounds = 300, gamma = 0, lambda = 1),
-  "mi_features_15"   = list(max_depth = 4, eta = 0.05, nrounds = 600, gamma = 0.25, lambda = 10),
-  "mi_features_25"   = list(max_depth = 3, eta = 0.1, nrounds = 300, gamma = 0, lambda = 10),
-  "br_features"      = list(max_depth = 4, eta = 0.05, nrounds = 600, gamma = 0, lambda = 1),
-  "corr_features"    = list(max_depth = 3, eta = 0.1, nrounds = 300, gamma = 0.25, lambda = 1),
-  "F_test_features"  = list(max_depth = 4, eta = 0.05, nrounds = 600, gamma = 0, lambda = 10)
+  "benchmark_input"  = list(max_depth = 3, eta = 0.01, nrounds = 600, gamma = 0, lambda = 10),
+  "var_features"     = list(max_depth = 4, eta = 0.01, nrounds = 300, gamma = 0, lambda = 1),
+  "mi_features_15"   = list(max_depth = 5, eta = 0.01, nrounds = 300, gamma = 0.25, lambda = 10),
+  "mi_features_25"   = list(max_depth = 3, eta = 0.01, nrounds = 600, gamma = 0, lambda = 1),
+  "br_features"      = list(max_depth = 3, eta = 0.01, nrounds = 600, gamma = 0, lambda = 10),
+  "corr_features"    = list(max_depth = 3, eta = 0.01, nrounds = 300, gamma = 0.25, lambda = 10),
+  "F_test_features"  = list(max_depth = 3, eta = 0.01, nrounds = 600, gamma = 0, lambda = 1)
 )
 
 balanced_accuracy_summary <- function(data, lev = NULL, model = NULL) {
@@ -363,4 +363,4 @@ cat(paste("Model saved successfully in:", model_path, "\n"))
 
 ### **Summary**
 
-The XGBoost model has been successfully trained and evaluated. The best performing feature group on the validation set was **`r best_group`** with a balanced accuracy of **`r round(best_score, 4)`**. This model will be used as one of the base models in the ensemble method in the final part of the project.
+The XGBoost model has been successfully trained and evaluated. The best performing feature group on the validation set was **`var_features`** with a balanced accuracy of **`0.615`**. This model will be used as one of the base models in the ensemble method in the final part of the project.

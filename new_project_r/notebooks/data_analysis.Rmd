@@ -119,7 +119,7 @@ cat("\nFrequency of data type (TEST):\n")
 print(table(sapply(data_test_new, class)))
 ```
 
-### Data analysis 
+### Data analysis
 
 #### **Distribution of target variable**
 
@@ -225,7 +225,7 @@ is_brake_assist_plot <- bar_plot_generator(data_train, "is_brake_assist")
 save_plot(is_brake_assist_plot)
 ```
 
-### **Saving cleand  train and test datasets**
+### **Saving cleand train and test datasets**
 
 ```{r}
 write.csv(data_new, here("data", "data_cleaned.csv"), row.names = FALSE)

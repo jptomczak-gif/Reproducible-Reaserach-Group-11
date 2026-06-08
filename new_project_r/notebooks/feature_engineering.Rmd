@@ -47,7 +47,7 @@ data_test <- read.csv(here("data", "data_test_cleaned.csv"))
 kable(head(data))
 ```
 
-### **Feature engeenering - numerical variables** 
+### **Feature engeenering - numerical variables**
 
 ##### **subscription_length**
 

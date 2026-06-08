@@ -45,7 +45,7 @@ xgb_best_model <- readRDS(here("new_project_r", "outputs", "xgboost_model.rds"))
 
 ```
 
-#### Random Forest 
+#### Random Forest
 
 ```{r}
 rf_test_pred <- predict(rf_best_model, X_test, type = "response")
